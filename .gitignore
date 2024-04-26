@@ -1,0 +1,12 @@
+*token*
+*.csv
+*xlsx
+*xls
+.idea
+*.sql
+__pycache__
+.vscode
+*.egg-info
+*.history
+
+docs/build/

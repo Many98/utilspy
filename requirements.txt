@@ -1,0 +1,8 @@
+pandas==1.4.1
+tqdm==4.62.3
+pyodbc==4.0.35
+requests==2.27.1
+sqlalchemy==2.0.5
+googletrans==3.0.0
+openpyxl==3.0.9
+XlsxWriter==3.0.2
