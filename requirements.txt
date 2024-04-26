@@ -1,6 +1,6 @@
-pandas==1.4.1
+pandas==2.2.2
 tqdm==4.62.3
-pyodbc==4.0.35
+pyodbc==5.1.0
 requests==2.27.1
 sqlalchemy==2.0.5
 googletrans==3.0.0
