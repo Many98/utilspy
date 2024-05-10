@@ -46,7 +46,7 @@ git clone https://github.com/Many98/utilspy.git  && cd utilspy && pip install --
 ## Examples:
 
 * #### Connector
-    Implement custom `MyClass` which inherits all `Connector`'s functionality.
+    Implement custom `MyClass` which inherits all `Connector`'s functionality i.e. `Connector` can be used as Mixin.
     Then initialize instance `mc` of `MyClass`, load some data from excel file and export
     another data to `out_table`.
 
@@ -56,7 +56,7 @@ git clone https://github.com/Many98/utilspy.git  && cd utilspy && pip install --
     import pandas as pd
 
     class MyClass(utilspy.Connector):
-        def __init__() -> None:
+        def __init__(self) -> None:
             super().__init__()
             
     mc = MyClass() # have now access to handy load/export methods of `Connector`
