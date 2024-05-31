@@ -1,5 +1,5 @@
 numpy==1.22.2
-pandas==2.2.2
+pandas==2.0.3
 tqdm==4.62.3
 pyodbc==5.1.0
 requests==2.27.1
