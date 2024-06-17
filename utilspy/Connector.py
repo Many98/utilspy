@@ -66,22 +66,26 @@ class Connector():
                     return 'excel'
 
                 else:
-                    raise Exception('Unable to infer input source type. Please specify `load_from` parameter or'
-                                    'make sure `in_file_path` has correct extension (.csv or .xlsx).')
+                    raise ValueError('Unable to infer input source type. Please specify `load_from` parameter or'
+                                     'make sure `in_file_path` has correct extension (.csv or .xlsx).')
             elif not in_table and not in_file_path:
-                 raise Exception('`in_table` nor `in_file_path` specified. Unable to load data.')
+                 raise ValueError('Neither `in_table` nor `in_file_path` specified. Unable to load data.')
             elif in_table: 
-                if server and db:
-                    return 'db'
-                else:
-                    raise Exception('`server` or `db` parameter is not specified')
+                if not server or not db:
+                    raise ValueError('Both `server` and `db` parameters must be specified to load from database.')
+                return 'db'
+                
             else:
-                raise Exception('Unable to infer input source type. Please specify `load_from` parameter')
-        
-        mapping = {'excel': 'xlsx', 'csv': 'csv', 'json': 'json'}
+                raise ValueError('Unable to infer input source type. Please specify `load_from` parameter')
+            
+        if load_from not in ['csv', 'excel', 'json', 'db']:
+            raise ValueError(f'Invalid value for load_from: {load_from}')
 
         if load_from != 'db':
-            assert mapping[load_from] in os.path.splitext(in_file_path)[-1], f'`load_from={load_from}` does not correspond to input file extension {os.path.splitext(in_file_path)[-1]}'
+            expected_extension = '.' + {'excel': 'xlsx', 'csv': 'csv', 'json': 'json'}[load_from]
+            actual_extension = os.path.splitext(in_file_path)[-1]
+            if expected_extension != actual_extension:
+                raise ValueError(f'`load_from={load_from}` does not correspond to input file extension {actual_extension}')
 
         return load_from
             
@@ -106,25 +110,27 @@ class Connector():
             Optional name of output sql server table
         """
         if export_to == 'auto':
+            if not out_table and not out_file_path:
+                raise ValueError('Neither `out_table` nor `out_file_path` specified. Unable to export data.')
+        
             if not out_table and out_file_path:
-                if os.path.splitext(out_file_path)[-1] == '.csv':
+                file_extension = os.path.splitext(out_file_path)[-1]
+                if file_extension == '.csv':
                     return 'csv'
-                elif os.path.splitext(out_file_path)[-1] == '.json':
+                elif file_extension == '.json':
                     return 'json'
-                elif os.path.splitext(out_file_path)[-1] == '.xlsx':
+                elif file_extension == '.xlsx':
                     return 'excel'
+                else:
+                    raise ValueError('Unable to infer output source type. Unsupported file extension or missing `export_to` specification.')
 
-                else:
-                    raise Exception('Unable to infer output source type. Please specify `export_to` parameter or make sure `out_file_path` has correct extension.')
-            elif not out_table and not out_file_path:
-                raise Exception('`out_table` nor `out_file_path` specified. Unable to export data.')
-            elif out_table:
-                if server and db:
-                    return 'db'
-                else:
-                    raise Exception('`server` or `db` parameter is not specified')
-            else:
-                raise Exception('Unable to infer output source type. Please specify `export_to` parameter')
+            if out_table:
+                if not server or not db:
+                    raise ValueError('Both `server` and `db` parameters must be specified to export to a database.')
+                return 'db'
+        elif export_to not in ['csv', 'excel', 'json', 'db']:
+            raise ValueError(f'Invalid value for export_to: {export_to}. Valid options are `csv`, `excel`, `json`, `db`, or `auto`.')
+        
         return export_to
         
     def _load_from_db(self, server: str = '', db: str = '', in_table: str = '', *args, **kwargs) -> pd.DataFrame:
@@ -142,114 +148,128 @@ class Connector():
         possible_drivers = ['SQL Server Native Client 11.0', 'ODBC Driver 17 for SQL Server'] 
         installed_drivers = pyodbc.drivers()
         drivers = [i for i in possible_drivers if i in installed_drivers]
-        driver = '{' + drivers[0] + '}'
+        
+        if not drivers:
+            error_message = "No suitable SQL Server drivers installed."
+            logging.error(error_message)
+            raise EnvironmentError(error_message)
 
+        driver = '{' + drivers[0] + '}'
         logging.info(f'Loading from databae: {server}.{db}.dbo.{in_table}')
+
         try:
-            with pyodbc.connect(f'Driver={driver};Server={server};Database={db};Trusted_Connection=yes;', autocommit=True) as conn:
+            connection_string = f'Driver={driver};Server={server};Database={db};Trusted_Connection=yes;'
+            with pyodbc.connect(connection_string, autocommit=True) as conn:
                 in_data = pd.read_sql_query(f'SELECT * FROM {in_table}', conn, *args, **kwargs)
+
+        except pyodbc.Error as e:
+            logging.error(f"Database connection failed: {e}")
+            raise ConnectionError(f"Database connection failed: {e}")
+        except pd.errors.DatabaseError as e:
+            logging.error(f"SQL query execution failed: {e}")
+            raise
         except Exception as e:
-            logging.info(e)
+            logging.error(f"An unexpected error occurred: {e}")
             page = 'https://learn.microsoft.com/en-us/sql/connect/python/pyodbc/step-1-configure-development-environment-for-pyodbc-python-development?source=recommendations&view=sql-server-ver16'
             logging.info('Probably there is not installed proper driver for SQL server on this machine. To load data from database please follow \n'
                   f'instructions on this page {page} \n.'
                   'You can also consider loading from excel/csv file if needed.')
-            raise
+            raise RuntimeError(f"An unexpected error occurred: {e}")
 
         return in_data
-
-    def _load_from_excel(self, in_file_path: str = '', *args, **kwargs) -> pd.DataFrame:
+    
+    def _load_from_file(self, file_type, in_file_path, *args, **kwargs) -> pd.DataFrame:
         """
-        auxiliary method to load data from excel file
+        Generic method to load data from a specified file type.
 
-        Parameters
+        Parameters:
+        file_type: str
+            Type of the file to load ('excel', 'csv', 'json')
         in_file_path: str
-            Absolute path of input file to be loaded
+            Absolute path of the file to be loaded
         """
-        logging.info(f'Loading from excel: {in_file_path}')
-        try:
-            return pd.read_excel(in_file_path)
-        except Exception as e:
-            logging.info(e)
-            raise
+        logging.info(f'Loading from {file_type}: {in_file_path}')
+        load_function = {
+            'excel': pd.read_excel,
+            'csv': pd.read_csv,
+            'json': pd.read_json
+        }.get(file_type)
 
-    def _load_from_csv(self, in_file_path: str = '', *args, **kwargs) -> pd.DataFrame:
-        """
-        auxiliary method to load data from csv file
+        if not load_function:
+            raise ValueError(f"Unsupported file type: {file_type}")
 
-        Parameters
-        in_file_path: str
-            Absolute path of input file to be loaded
-        """
-        logging.info(f'Loading from csv: {in_file_path}')
         try:
-            return pd.read_csv(in_file_path, *args, **kwargs)
+            return load_function(in_file_path, *args, **kwargs)
+        except FileNotFoundError:
+            error_msg = f'The file {in_file_path} was not found.'
+            logging.error(error_msg)
+            raise FileNotFoundError(error_msg)
+        except ValueError as ve:
+            error_msg = f'Value error while loading the {file_type} file: {ve}'
+            logging.error(error_msg)
+            raise ValueError(error_msg)
         except Exception as e:
-            logging.info(e)
-            raise
-
-    def _load_from_json(self, in_file_path: str = '', *args, **kwargs) -> pd.DataFrame:
-        """
-        auxiliary method to load data from json file
-        Parameters
-        in_file_path: str
-            Absolute path of input file to be loaded
-        """
-        logging.info(f'Loading from json: {in_file_path}')
-        try:
-            return pd.read_json(in_file_path, *args, **kwargs)
-        except Exception as e:
-            logging.info(e)
-            raise
+            error_msg = f'An unexpected error occurred while loading the {file_type} file: {e}'
+            logging.error(error_msg)
+            raise RuntimeError(error_msg)
 
     def load(self, load_from: str = 'auto', in_file_path: str = '',
              server: str = '', db: str = '', in_table: str = '', *args, **kwargs) -> pd.DataFrame:
         """
-        method to load data from csv, json, excel and SQL server database
+        Method to load data from csv, json, excel files, or a SQL server database.
 
-        Parameters
-        load_from: str
-            Specify from which source load. Can be one of `csv`, `excel`, `db`, `auto`.
-            Default is `auto` which means that type of input source will be infered from other parameters
-        in_file_path: str
-            Absolute path of input file to be loaded
-        server: str
-            server name (server in local network)
-        db: str
-            Name of sql server database
-        in_table: str
-            Optional name of input sql server table
+        Parameters:
+        load_from : str
+            Specify the source type from which to load. Options are 'csv', 'excel', 'db', 'json', 'auto'.
+            Default is 'auto', which infers the type from other parameters.
+        in_file_path : str
+            Absolute path of the input file to be loaded.
+        server : str
+            Server name (server in the local network).
+        db : str
+            Name of the SQL server database.
+        in_table : str
+            Optional name of the input SQL server table.
 
-        Note
-        For specifying additional parameters please refer to
-        https://pandas.pydata.org/docs/reference/api/pandas.read_excel.html .. for excel
-        https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html ... for csv
-        https://pandas.pydata.org/docs/reference/api/pandas.read_json.html  ... for json
-        https://pandas.pydata.org/docs/reference/api/pandas.read_sql_query.html ... for database
+        Returns:
+        pd.DataFrame
+            A DataFrame containing the loaded data.
 
-        For instance one may need to specify encoding when loading from csv
-        then one can use e.g. `load('in_file_path.csv', encoding='utf-8')`
-        which will load data from `in_file_path.csv` and use `encoding='utf-8'`
+        Raises:
+        ValueError
+            If the `load_from` parameter is not one of the expected options or if the loading process fails due to unsupported configuration.
 
-        or for example load specific sheet from excel:
-        `load('in_file_path.xlsx', sheet_name='Sheet2')`
+        Examples:
+        Loading with specific encoding from CSV:
+            load('csv', in_file_path='in_file_path.csv', encoding='utf-8')
+
+        Loading a specific sheet from an Excel file:
+            load('excel', in_file_path='in_file_path.xlsx', sheet_name='Sheet2')
+
+        Note:
+        For specifying additional parameters, please refer to the pandas documentation:
+        - For Excel: https://pandas.pydata.org/docs/reference/api/pandas.read_excel.html
+        - For CSV: https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html
+        - For JSON: https://pandas.pydata.org/docs/reference/api/pandas.read_json.html
+        - For database: https://pandas.pydata.org/docs/reference/api/pandas.read_sql_query.html
         """
         
-        assert load_from in ['csv', 'json', 'excel', 'db', 'auto'], f'Argument `load_from` must be one of' \
-                                                                   '`csv`, `json`, `excel`, `db`, `auto`'
+        valid_sources = ['csv', 'json', 'excel', 'db', 'auto']
+        if load_from not in valid_sources:
+            raise ValueError(f'Argument `load_from` must be one of {valid_sources}, got {load_from}')
         
         load_from = self._infer_from(load_from, in_file_path, server, db, in_table)   
 
         if load_from == 'csv':
-            in_data = self._load_from_csv(in_file_path, *args, **kwargs)
+            in_data = self._load_from_file('csv', in_file_path, *args, **kwargs)
         elif load_from == 'json':
-            in_data = self._load_from_json(in_file_path, *args, **kwargs)
+            in_data = self._load_from_file('json', in_file_path, *args, **kwargs)
         elif load_from == 'excel':
-            in_data = self._load_from_excel(in_file_path, *args, **kwargs)
+            in_data = self._load_from_file('excel', in_file_path, *args, **kwargs)
         elif load_from == 'db':
             in_data = self._load_from_db(server, db, in_table, *args, **kwargs)
         else:
-            raise Exception(f'Non-implemented for `{load_from}`')
+            raise ValueError(f'Unsupported loading source `{load_from}`')
         
         return in_data
 
@@ -321,22 +341,18 @@ class Connector():
             Default is `write`
         """
         logging.info(f'Inserting to excel: {out_file_path}')
-        m = 'a' if mode == 'append' else 'w'
-        kwargs['index'] = False if 'index' not in kwargs else kwargs['index']
-        
+        mode_flag = 'a' if mode == 'append' else 'w'
+        kwargs.setdefault('index', False)
+
+        kwgs = {"if_sheet_exists": 'overlay'} if mode == 'append' else {}
+
         try:
-            if m == 'a' and os.path.isfile(out_file_path):
-                kwargs['header'] = None if 'header' not in kwargs else kwargs['header']
-                with pd.ExcelWriter(out_file_path, mode=m, engine='openpyxl',if_sheet_exists='overlay') as writer:
-                    out_data.to_excel(writer, sheet_name='output', startrow=writer.sheets['output'].max_row,
-                                             *args, **kwargs)
-            else:
-                kwargs['header'] = True if 'header' not in kwargs else kwargs['header']
-                with pd.ExcelWriter(out_file_path, mode=m) as writer:
-                    out_data.to_excel(writer, sheet_name='output', *args, **kwargs)
+            with pd.ExcelWriter(out_file_path, mode=mode_flag, engine='openpyxl', **kwgs) as writer:
+                out_data.to_excel(writer, sheet_name='output', startrow=writer.sheets['output'].max_row if mode == 'append' else 0, header=True if mode == 'write' else None, **kwargs)
         except Exception as e:
-            logging.info(e)
+            logging.error(f"Failed to export to Excel: {e}")
             raise
+        
 
     def _export_to_json(self, out_data: pd.DataFrame, out_file_path: str = '', mode: str='write', *args, **kwargs) -> None:
         """
@@ -374,18 +390,18 @@ class Connector():
 
             Default is `write`
         """
-        m = 'a' if mode == 'append' else 'w'
-        kwargs['index'] = False if 'index' not in kwargs else kwargs['index']
-        kwargs['mode'] = m if 'mode' not in kwargs else kwargs['mode']
-        kwargs['header'] = not os.path.isfile(out_file_path) or kwargs['mode']=='w' if 'header' not in kwargs else kwargs['header']
-        kwargs['encoding'] = 'utf-8-sig' if 'encoding' not in kwargs else kwargs['encoding']
+        logging.info(f'Exporting to CSV: {out_file_path}')
 
-        logging.info(f'Inserting to csv: {out_file_path}')
+        mode_flag = 'a' if mode == 'append' else 'w'
+        kwargs.setdefault('index', False)
+        kwargs.setdefault('mode', mode_flag)
+        kwargs.setdefault('header', False if mode == 'append' and os.path.exists(out_file_path) else True)
+        kwargs.setdefault('encoding', 'utf-8-sig')
 
         try:
             out_data.to_csv(out_file_path, *args, **kwargs)
         except Exception as e:
-            logging.info(e)
+            logging.error(f"Failed to export to CSV: {e}")
             raise
 
     def export(self, out_data: pd.DataFrame, export_to: str = 'auto', out_file_path: str = '',
@@ -393,100 +409,97 @@ class Connector():
                 schema: str = 'auto',
                 mode: str='write', *args, **kwargs) -> None:
         """
-        method for exporting data to csv, excel or SQL server database
-        
-        Parameters
-        out_data: pd.DataFrame
-            data to be exported presented as pd.DataFrame
-        export_to: str
-            Specify destination type of data. Can be one of `csv`, `excel`, `db`, `auto`.
-            Default is `auto` which means that type of output destination will be infered from other parameters
-        out_file_path: str
-            Absolute path of output file 
-        server: str
-            server name (server in local network)
-        db: str
-            Name of sql server database
-        out_table: str
-            Optional name of output sql server table
-        schema: str
-            Schema of output table.
-            Default is `auto` which means that schema will be infered automatically from `out_data` dataframe
-        mode: str
-            Specify type of export. Can be one of `append` or `write`.
-            `append` will append data to existing table
-            `write` will first drop existing table and then create new `out_table`
+        Method for exporting data to csv, excel, or SQL server database.
 
-            Default is `write`
+        Parameters:
+        out_data : pd.DataFrame
+            Data to be exported.
+        export_to : str
+            Specify destination type of data. Options are 'csv', 'excel', 'db', 'auto'.
+        out_file_path : str
+            Absolute path of the output file.
+        server, db, out_table : str
+            Database server, database name, and table name for database exports.
+        schema : str
+            Schema of the output table, automatically inferred if set to 'auto'.
+        mode : str
+            'append' to add to existing data, 'write' to overwrite.
 
-        for additional parameters please refer to:
-        https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.to_excel.html ... for excel
-        https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.to_csv.html ... for csv
-
+        Raises:
+        ValueError: If parameters are invalid or missing.
+        Exception: For generic errors and non-implemented features.
         """
 
         if not isinstance(out_data, pd.DataFrame):
-            raise Exception('`out_data` must of type `pd.DataFrame`')
-        
-        assert mode in ['append', 'write'], f'Mode must be one of `append`, `write`'
+            raise ValueError('`out_data` must be of type `pd.DataFrame`')
 
-        assert export_to in ['csv', 'excel', 'db', 'auto'], f'Argument `export_to` must be one of ' \
-                                                                   '`csv`, `excel`, `db`, `auto`'
+        if mode not in ['append', 'write']:
+            raise ValueError('Mode must be one of `append`, `write`')
+
+        if export_to not in ['csv', 'excel', 'db', 'auto']:
+            raise ValueError('Argument `export_to` must be one of `csv`, `excel`, `db`, `auto`')
 
         export_to = self._infer_to(export_to, out_file_path, server, db, out_table)
 
         mapping = {'excel': 'xlsx', 'csv': 'csv', 'json': 'json'}
 
         if export_to != 'db':
-            if not os.path.splitext(out_file_path)[-1]:
+            extension = os.path.splitext(out_file_path)[1]
+            if not extension:
                 out_file_path += f'.{mapping[export_to]}'
 
-        if export_to == 'csv':
-            self._export_to_csv(out_data, out_file_path, mode, *args, **kwargs)
-        elif export_to == 'json':
-            self._export_to_json(out_data, out_file_path, mode, *args, **kwargs)
-        elif export_to == 'excel':
-            self._export_to_excel(out_data, out_file_path, mode, *args, **kwargs)
-        elif export_to == 'db':
-            try:
-                self._export_to_db(out_data, server, db, out_table, schema, mode, *args, **kwargs)
-            except Exception as e:
-                logging.info(e)
-                logging.info('Some SQL error occured. Most probably there is no proper SQL server driver installed. \n '
-                             f'Exporting to {os.path.join(os.getcwd(), out_table+".xlsx")} instead.')
-                self._export_to_excel(out_data, out_table+'.xlsx', mode, *args, **kwargs)
-        else:
-            raise Exception(f'Non-implemented for `{export_to}`')
+        try:
+            if export_to == 'csv':
+                self._export_to_csv(out_data, out_file_path, mode, *args, **kwargs)
+            elif export_to == 'json':
+                self._export_to_json(out_data, out_file_path, mode, *args, **kwargs)
+            elif export_to == 'excel':
+                self._export_to_excel(out_data, out_file_path, mode, *args, **kwargs)
+            elif export_to == 'db':
+                    self._export_to_db(out_data, server, db, out_table, schema, mode, *args, **kwargs)
+        except Exception as e:
+            logging.error(f"Error exporting data: {e}")
+            raise
         
     def _create_table(self, schema: str, in_data: pd.DataFrame, out_table: str, cursor: pyodbc.Cursor)-> None:
-        """auxiliary method to create new `out_table`, drop old one if already exists
-            in_data: pd.DataFrame
-                input data which will be used to infer schema (if used `schema=auto`)
-            schema: str
-                Schema of output table.
-            out_table: str
-                name of output sql server table
-            cursor: pyodbc.Cursor
-                pyodbc.Cursor object
+        """
+            Create or replace an SQL table based on DataFrame schema.
+
+            Parameters:
+            schema : str
+                Schema specification, auto-generated if 'auto'.
+            in_data : pd.DataFrame
+                DataFrame to infer the schema from if needed.
+            out_table : str
+                Name of the output SQL server table.
+            cursor : pyodbc.Cursor
+                Active database cursor.
         """
 
         if schema == 'auto':
-
-            dtypes = [str(i).replace('64', '').replace('32', '').replace('16', '').replace('object', 'varchar(max)').replace('str', 'varchar(max)') for i in in_data.dtypes.to_list()]
-            cols = list(in_data.columns)
-            schema = [f'{col_name} {dtype}' for col_name, dtype in zip(cols, dtypes)]
-            schema = ', '.join(schema)
+            # Inference should handle SQL data types appropriately
+            dtypes = {dtype: sql_type for dtype, sql_type in zip(in_data.dtypes, ['VARCHAR(MAX)' if dtype.name == 'object' else 'FLOAT' if dtype.name.startswith('float') else 'INT' for dtype in in_data.dtypes])}
+            schema = ', '.join([f"{col} {dtypes[col.dtype]}" for col in in_data])
         
         cursor.execute(f"IF OBJECT_ID('{out_table}') IS NOT NULL DROP TABLE {out_table};")
-        cursor.execute(f'CREATE TABLE {out_table} ( ' + schema + ' );')
-        logging.info(f'Table {out_table} create successfully')
+        cursor.execute(f"CREATE TABLE {out_table} ({schema});")
+        logging.info(f"Table {out_table} created successfully.")
 
 if __name__ == '__main__':
 
     df = pd.DataFrame({'a': [1, 2, 4, 5], 'b': ['a', 'b', 'c', 'e']})
 
-    csv = r''
+    csv = r'test.csv'
+    excel = r'excel.xlsx'
     c = Connector() 
 
-    c.load(load_from='auto', in_file_path=csv, encoding='latin-1')
-    c.export(df, export_to='csv', out_file_path=r'')
+    c.export(df, export_to='csv', out_file_path=csv)
+    print(c.load(load_from='auto', in_file_path=csv, encoding='latin-1'))
+    c.export(df, export_to='auto', out_file_path=excel)
+    print(c.load(load_from='auto', in_file_path=excel))
+    c.export(df, export_to='auto', out_file_path=excel)
+    print(c.load(load_from='auto', in_file_path=excel))
+    c.export(df, export_to='auto', out_file_path=excel, mode='append')
+    print(c.load(load_from='auto', in_file_path=excel))
+    c.export(df, export_to='csv', out_file_path=r'test')
+    print(c.load(load_from='auto', in_file_path=r'test', encoding='latin-1'))
